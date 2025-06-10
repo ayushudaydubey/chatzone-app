@@ -356,7 +356,7 @@ io.on("connection", (socket) => {
 
   socket.on("register-user", async (username) => {
     onlineUsers.set(socket.id, username)
-    socket.username = username
+    socket.username = username 
 
     const usersWithStatus = await getAllUsersWithStatus()
     io.emit("update-users", usersWithStatus)
