@@ -16,13 +16,24 @@ import userModel from './src/Models/users.models.js'
 const app = express()
 const server = createServer(app)
 
-// Initialize Socket.IO FIRST
+// Fixed CORS origins - removed trailing slash and updated URL
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://chatzone-frontend-1ozbvzi6a-ayush-dubeys-projects-2629d683.vercel.app/'
+]
+
+// Initialize Socket.IO with proper configuration for production
 const io = new Server(server, {
   cors: {
-    origin: ['http://localhost:5173','https://chatzone-frontend-1ozbvzi6a-ayush-dubeys-projects-2629d683.vercel.app/'],
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true
-  }
+  },
+  // Important for production deployment
+  transports: ['websocket', 'polling'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000
 })
 
 // Initialize ImageKit
@@ -49,9 +60,9 @@ const upload = multer({
   }
 })
 
-// CORS setup
+// CORS setup - fixed origins
 app.use(cors({
-  origin: ['http://localhost:5173','https://chatzone-frontend-1ozbvzi6a-ayush-dubeys-projects-2629d683.vercel.app/'],
+  origin: allowedOrigins,
   credentials: true
 }))
 
@@ -60,7 +71,20 @@ app.use(cookieParser())
 
 // Home route
 app.get("/", (req, res) => {
-  res.send("Home")
+  res.json({ 
+    message: "ChatZone Backend Server is running!",
+    status: "healthy",
+    timestamp: new Date().toISOString()
+  })
+})
+
+// Health check route for deployment
+app.get("/health", (req, res) => {
+  res.json({ 
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  })
 })
 
 // File upload endpoint
@@ -203,10 +227,10 @@ app.get("/user/messages", async (req, res) => {
   }
 })
 
-// Get unread messages endpoint - MOVED OUTSIDE SOCKET HANDLER
+// Get unread messages endpoint
 app.get("/user/unread-messages", async (req, res) => {
   try {
-    const { username } = req.query // Get username from query params instead
+    const { username } = req.query
     
     if (!username) {
       return res.status(400).json({ error: "Username is required" })
@@ -217,7 +241,7 @@ app.get("/user/unread-messages", async (req, res) => {
       {
         $match: {
           receiverId: username,
-          isRead: { $ne: true } // Messages that are not marked as read
+          isRead: { $ne: true }
         }
       },
       {
@@ -299,7 +323,7 @@ app.get("/user/unread-messages", async (req, res) => {
   }
 })
 
-// Mark messages as read endpoint - MOVED OUTSIDE SOCKET HANDLER
+// Mark messages as read endpoint
 app.post("/user/mark-read", async (req, res) => {
   try {
     const { senderId, receiverId } = req.body
@@ -350,28 +374,28 @@ const getAllUsersWithStatus = async () => {
   }
 }
 
-// Socket.IO connection handling
+// Socket.IO connection handling with better error handling
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id)
 
   socket.on("register-user", async (username) => {
-    onlineUsers.set(socket.id, username)
-    socket.username = username 
+    try {
+      onlineUsers.set(socket.id, username)
+      socket.username = username 
 
-    const usersWithStatus = await getAllUsersWithStatus()
-    io.emit("update-users", usersWithStatus)
-    
-    console.log(`${username} came online. Total users:`, usersWithStatus.length)
+      const usersWithStatus = await getAllUsersWithStatus()
+      io.emit("update-users", usersWithStatus)
+      
+      console.log(`${username} came online. Total users:`, usersWithStatus.length)
+    } catch (error) {
+      console.error('Error in register-user:', error)
+      socket.emit("error", { message: "Failed to register user" })
+    }
   })
 
-  // SINGLE private-message handler with proper read status
   socket.on("private-message", async ({ fromUser, toUser, message }) => {
     try {
       const timestamp = new Date()
-      
-      // Check if receiver is online
-      const receiverSocket = Array.from(io.sockets.sockets.values())
-        .find(s => s.username === toUser)
       
       const newMessage = new messageModel({
         senderId: fromUser,
@@ -379,7 +403,7 @@ io.on("connection", (socket) => {
         message,
         messageType: 'text',
         timeStamp: timestamp,
-        isRead: false // Always start as unread
+        isRead: false
       })
 
       await newMessage.save()
@@ -409,27 +433,57 @@ io.on("connection", (socket) => {
     }
   })
 
-  socket.on("disconnect", async () => {
-    const username = onlineUsers.get(socket.id)
-    onlineUsers.delete(socket.id)
-    
-    const usersWithStatus = await getAllUsersWithStatus()
-    io.emit("update-users", usersWithStatus)
-    
-    if (username) {
-      console.log(`${username} went offline. Remaining online:`, Array.from(onlineUsers.values()))
+  socket.on("disconnect", async (reason) => {
+    try {
+      const username = onlineUsers.get(socket.id)
+      onlineUsers.delete(socket.id)
+      
+      const usersWithStatus = await getAllUsersWithStatus()
+      io.emit("update-users", usersWithStatus)
+      
+      if (username) {
+        console.log(`${username} went offline (${reason}). Remaining online:`, Array.from(onlineUsers.values()))
+      }
+    } catch (error) {
+      console.error('Error handling disconnect:', error)
     }
   })
 
   socket.on("error", (error) => {
     console.error("Socket error:", error)
   })
+
+  // Handle socket connection errors
+  socket.on("connect_error", (error) => {
+    console.error("Socket connection error:", error)
+  })
 })
 
 // Routes
 app.use("/user", routes)
 
-server.listen(3000, () => {
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err)
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : err.message
+  })
+})
+
+// Handle 404 routes
+app.use('*', (req, res) => {
+  res.status(404).json({ 
+    error: 'Route not found',
+    path: req.originalUrl
+  })
+})
+
+// Use environment variable for port
+const PORT = process.env.PORT || 3000
+
+server.listen(PORT, () => {
   toConnectDB()
-  console.log("Server is running on http://localhost:3000")
+  console.log(`Server is running on port ${PORT}`)
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`)
 })
